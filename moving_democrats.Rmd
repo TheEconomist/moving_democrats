@@ -1,0 +1,239 @@
+---
+title: "Moving Democrats for the Senate"
+author: "Daniella Raz"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+
+# from David Shor's calculations, including std. dev.
+shor_data_trimmed = read.csv("shor_data_trimmed.csv")
+std_dev = 0.0362
+shor_data_trimmed$baseline_winning = pnorm(shor_data_trimmed$expected_share, mean = 0.5, sd = std_dev)
+```
+
+input:
+
+  1. dem: the number of votes received by Joe Biden in 2020
+
+  2. repub: the number of votes received by Donald Trump in 2020
+
+  3. old_probability_win: the probability of the Democrat winning the state in a neutral environment, given their two-party vote share 
+
+  4. expected_prop: the expected proportion of the two-party vote won by the Democrat in a neutral environment
+
+  5. std_dev: the standard deviation of two-party vote share 
+
+  6. votes: the number of votes added in this iteration
+  
+output:
+
+  1. updated_dem: the number of votes received by Joe Biden in 2020, adjusted for the votes we moved (same as dem for 48/50 states)
+  
+  2. updated_probability_win: old_probability_win updated with the shifted vote total (same as old_probability_win for 48/50 states)
+  
+  3. updated_expected_prop: expected_prop updated with shifted vote total (same as expected_prop for 48/50 states)
+  
+  4. new_seats: the expected number of senate seats under this allocation
+```{r}
+demo_vote_adder = function(dem, repub, old_probability_win, expected_prop, std_dev, votes){
+  
+  # Calculate the new expected proportion of the democrat vote in a neutral environment if each state 
+  # added or subtracted "votes" 
+  dem_prop = (expected_prop * (dem + repub) + votes) / (dem + repub + votes)
+  dem_prop_subtract = (expected_prop * (dem + repub) - votes) / (dem + repub - votes)
+  
+  # Calculate the updated probability of winning in a neutral environment if each state added or subtracted "votes"
+  new_probability_win = pnorm(dem_prop, mean = 0.5, sd = std_dev)
+  new_probability_win_subtract = pnorm(dem_prop_subtract, mean = 0.5, sd = std_dev)
+  
+  # Calculate how much that probability changed in each state
+  change_in_prob = new_probability_win - old_probability_win
+  change_in_prob_subtract = new_probability_win_subtract - old_probability_win
+  
+  # Finding which state saw the biggest increase with "votes" added and the smallest decrease
+  # with "votes" subtracted. 
+  # Note, I prevent taking additional votes from a state with 0% democrats. 
+  max_change = max(change_in_prob)
+  max_change_subtract = max(change_in_prob_subtract - as.numeric(dem_prop_subtract < 0)*100)
+  
+  # Create variables that show the change in Dem win probability after adding votes to 1 state and subtracting
+  # votes from another state.
+  state_add_pct = as.numeric(change_in_prob == max_change) * max_change
+  state_subtract_pct = as.numeric(change_in_prob_subtract == max_change_subtract) * max_change_subtract
+  
+  # Update win probabilities and expected proportion of two-party vote won by Democrats in a neutral environment after
+  # shifting votes from one state to another.
+  updated_probability_win = old_probability_win + state_add_pct + state_subtract_pct
+  updated_dem = dem + as.numeric(change_in_prob == max_change) * votes - as.numeric(change_in_prob_subtract == max_change_subtract) * votes
+  updated_expected_prop = as.numeric(change_in_prob == max_change) * dem_prop + 
+    as.numeric(change_in_prob_subtract == max_change_subtract) * dem_prop_subtract + 
+    as.numeric(change_in_prob != max_change & change_in_prob_subtract != max_change_subtract) * expected_prop
+  
+  # Calculate the expected number of seats won by Dems in a neutral environment given the updated vote allocations.
+  # This is equal to the sum of probability of winning each state, multiplied by 2. 
+  new_seats = sum(updated_probability_win)*2
+  return(list(updated_dem, updated_probability_win, updated_expected_prop, new_seats))
+}
+```
+
+
+I set it to iterate through 200,000 votes at a time, at first. We use the base values from David
+Shor for the first iteration. In a neutral environment, Democrats should expect to
+win 39.62 Senate seats before re-allocating votes. 
+```{r}
+# Expected Senate seats won
+sum(shor_data_trimmed$baseline_winning)*2
+
+vote_increments = 200000
+
+votes_added = demo_vote_adder(shor_data_trimmed$biden, 
+                              shor_data_trimmed$trump, 
+                              shor_data_trimmed$baseline_winning,
+                              shor_data_trimmed$expected_share,
+                              std_dev,
+                              vote_increments)
+
+updated_dem = votes_added[[1]]
+updated_probability_win = votes_added[[2]]
+updated_expected_prop = votes_added[[3]]
+new_seats = votes_added[[4]]
+vote_counter = vote_increments
+```
+
+Going through 4 iterations of 200,000 vote chunks. 
+Then continue at 5000 vote chunks until Democrats are expected to win 50 seats. 
+Note that across the past 6 presidential elections (2000-2020), Democrats have
+won an average of 51.4% of the two-party vote share. 
+To allocate votes with that threshold inmind, change 50 to 51.4 in line 132.
+```{r}
+counter = 1
+while(counter < 5){
+  votes_added = demo_vote_adder(updated_dem, 
+                                shor_data_trimmed$trump,
+                                updated_probability_win, 
+                                updated_expected_prop,
+                                std_dev, 
+                                vote_increments)
+  
+  updated_dem = votes_added[[1]]
+  updated_probability_win = votes_added[[2]]
+  updated_expected_prop = votes_added[[3]]
+  new_seats = votes_added[[4]]
+  vote_counter = vote_counter + vote_increments
+  
+  counter = counter + 1
+}
+
+vote_increments = 5000
+while(new_seats < 50){
+  votes_added = demo_vote_adder(updated_dem, 
+                                shor_data_trimmed$trump,
+                                updated_probability_win, 
+                                updated_expected_prop,
+                                std_dev, 
+                                vote_increments)
+  
+  updated_dem = votes_added[[1]]
+  updated_probability_win = votes_added[[2]]
+  updated_expected_prop = votes_added[[3]]
+  new_seats = votes_added[[4]]
+  vote_counter = vote_counter + vote_increments
+}
+```
+
+
+```{r, echo = FALSE}
+# Compile the results.
+results_df = data.frame(state = shor_data_trimmed$state, 
+                        votes_added = updated_dem - shor_data_trimmed$biden,
+                        original_expected_prop = round(shor_data_trimmed$expected_share, 3),
+                        updated_expected_prop = round(updated_expected_prop,3), 
+                        original_probability_win = round(shor_data_trimmed$baseline_winning, 4),
+                        updated_probability_win = round(updated_probability_win, 4))
+
+```
+
+Results: 
+
+```{r}
+total_num_votes_moved = sum(abs(results_df$votes_added)) / 2
+total_num_votes_moved
+new_seats
+results_df
+
+```
+
+Chart 1: Expected Democrat seats in different national environments
+
+```{r}
+change_from_50 = seq(-.1, .1, by = 0.0025)
+national_dem_vote = 0.5 + change_from_50
+
+expected_seats = rep(0, length(change_from_50))
+for(i in 1:length(change_from_50)){
+  updated_dem_prop = shor_data_trimmed$expected_share + change_from_50[i]
+  updated_dem_win_pct = pnorm(updated_dem_prop, mean = 0.5, sd = std_dev)
+  expected_seats[i] = sum(updated_dem_win_pct)*2
+}
+
+seat_environment = data.frame(expected_seats, national_dem_vote)
+write.csv(seat_environment, "seat_environment.csv", row.names = FALSE)
+```
+
+Chart 2: Map showing Democratic voters transferred out of CA to recipient states
+
+```{r}
+# adjusting for removal of all votes from CA instead
+# transferring votes removed from other states to CA (total 1.1 million votes)
+results_df %>% mutate(updated_expected_prop = case_when(votes_added < 0 ~ original_expected_prop,
+                                                        TRUE ~ updated_expected_prop),
+                      updated_probability_win = case_when(votes_added < 0 ~ original_probability_win,
+                                                          TRUE ~ updated_probability_win),
+                      votes_added = case_when(votes_added < 0 ~ 0,
+                                              state == "CA" ~ -1100000,
+                                              TRUE ~ votes_added)) -> results_df
+
+ca_prop_subtract = (shor_data_trimmed$expected_share[40] * (shor_data_trimmed$biden[40] + shor_data_trimmed$trump[40]) - 1100000) / 
+  (shor_data_trimmed$biden[40] + shor_data_trimmed$trump[40] - 1100000)
+
+# calculating for CA the updated probability of winning in a neutral environment if each state added or subtracted "votes"
+ca_probability_win = pnorm(ca_prop_subtract, mean = 0.5, sd = std_dev)
+ 
+results_df$updated_expected_prop[40] = ca_prop_subtract
+results_df$updated_probability_win[40] = ca_probability_win
+  
+sum(results_df$updated_probability_win) * 2
+
+write.csv(results_df, "data_for_map.csv", row.names = FALSE)
+```
+
+Chart 3: Stacked bar chart showing state-level
+
+```{r}
+stacked_chart_data = data.frame(state = shor_data_trimmed$state,
+                                neutral_dem_votes = shor_data_trimmed$expected_share * 
+                                  (shor_data_trimmed$biden + shor_data_trimmed$trump),
+                                neutral_repub_votes = (1 - shor_data_trimmed$expected_share) *
+                                  (shor_data_trimmed$biden + shor_data_trimmed$trump),
+                                votes_moved = results_df$votes_added,
+                                probability_dem_win = results_df$updated_probability_win)
+
+stacked_chart_data %>% mutate(rating = case_when(updated_probability_win <= 0.01 ~ "safe republican",
+                                                 updated_probability_win > 0.01 & updated_probability_win <= 0.1 ~ "solid republican",
+                                                 updated_probability_win > 0.1 & updated_probability_win <= 0.25 ~ "likely republican",
+                                                 updated_probability_win > 0.25 & updated_probability_win <= 0.4 ~ "lean republican",
+                                                 updated_probability_win > 0.4 & updated_probability_win <= 0.6 ~ "toss up",
+                                                 updated_probability_win > 0.6 & updated_probability_win <= 0.75 ~ "lean democrat",
+                                                 updated_probability_win > 0.75 & updated_probability_win <= 0.9 ~ "likely democrat",
+                                                 updated_probability_win > 0.9 & updated_probability_win <= 0.99 ~ "solid democrat",
+                                                 updated_probability_win > 0.99 ~ "safe democrat")) -> stacked_chart_data
+
+write.csv(stacked_chart_data, "stacked_chart_data.csv", row.names = FALSE)
+
+```
+
+
